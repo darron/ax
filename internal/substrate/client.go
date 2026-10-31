@@ -22,13 +22,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/google/ax/pkg/apis/v1alpha1"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -192,6 +193,15 @@ func (c *Client) EnsureAtespace(ctx context.Context, atespace string) error {
 		_, err := c.control.CreateAtespace(ctx, req)
 		return err
 	}, codes.Unavailable)
+	if err != nil && status.Code(err) == codes.PermissionDenied {
+		// A server scoped to its own atespaces cannot create atespaces. Accept
+		// one an operator created, which the server can still read.
+		if _, getErr := c.control.GetAtespace(ctx, &ateapipb.GetAtespaceRequest{
+			Atespace: &ateapipb.ObjectRef{Name: atespace},
+		}); getErr == nil {
+			return nil
+		}
+	}
 	if err != nil && status.Code(err) != codes.AlreadyExists {
 		return fmt.Errorf("creating atespace %q: %w", atespace, err)
 	}
@@ -327,6 +337,58 @@ func ResourceLimits(reqs *v1alpha1.ResourcesSpec) *ateapipb.ResourceRequirements
 	return &ateapipb.ResourceRequirements{Limits: out}
 }
 
+// workerSelectorFromEnv reads AX_WORKER_SELECTOR, comma-separated key=value
+// labels, so task actors land only on the worker pools carrying them.
+func workerSelectorFromEnv() *ateapipb.Selector {
+	raw := os.Getenv("AX_WORKER_SELECTOR")
+	if raw == "" {
+		return nil
+	}
+	labels := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		key, value, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if ok && key != "" {
+			labels[key] = value
+		}
+	}
+	if len(labels) == 0 {
+		return nil
+	}
+	return &ateapipb.Selector{MatchLabels: labels}
+}
+
+// capabilityName is a Linux capability without its CAP_ prefix, as Substrate's
+// ateapi.Capabilities expects. "ALL" is not a capability name.
+var capabilityName = regexp.MustCompile(`^[A-Z][A-Z_]*[A-Z]$`)
+
+// securityContextFromEnv reads AX_TASK_CAPABILITIES_ADD, comma-separated
+// capability names (no CAP_ prefix) granted to task containers on top of
+// Substrate's default AUDIT_WRITE, KILL and NET_BIND_SERVICE. Without them a
+// task's root cannot chown, override file permissions or switch users, so an
+// image that runs its agent as a non-root user cannot start it.
+// Invalid names or ALL leave the default set unchanged.
+func securityContextFromEnv() *ateapipb.SecurityContext {
+	raw := os.Getenv("AX_TASK_CAPABILITIES_ADD")
+	if raw == "" {
+		return nil
+	}
+	var add []string
+	seen := map[string]bool{}
+	for _, name := range strings.Split(raw, ",") {
+		name = strings.TrimSpace(name)
+		if name == "ALL" || !capabilityName.MatchString(name) {
+			slog.Warn("ignoring AX_TASK_CAPABILITIES_ADD: invalid capability name", "name", name)
+			return nil
+		}
+		if !seen[name] {
+			seen[name] = true
+			add = append(add, name)
+		}
+	}
+	slices.Sort(add)
+	return &ateapipb.SecurityContext{Capabilities: &ateapipb.Capabilities{Add: add}}
+}
+
 // BuildActorTemplate constructs a Substrate ActorTemplate based on the standard ate-env specification.
 // A nil resources applies DefaultCPUMillicores and DefaultMemoryBytes.
 func BuildActorTemplate(atespace, name, image string, envMap map[string]string, command []string, snapshotsBucket string, resources *ateapipb.ResourceRequirements) *ateapipb.ActorTemplate {
@@ -386,11 +448,13 @@ func BuildActorTemplate(atespace, name, image string, envMap map[string]string, 
 				Name:      "workspace",
 				MountPath: "/workspace",
 			}},
+			SecurityContext: securityContextFromEnv(),
 		}},
 		Volumes: []*ateapipb.Volume{{
 			Name:       "workspace",
 			DurableDir: &ateapipb.DurableDirVolumeSource{},
 		}},
+		WorkerSelector: workerSelectorFromEnv(),
 		SnapshotConfig: &ateapipb.SnapshotConfig{
 			StorageLocation:   snapshotsBucket,
 			PreferredFidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
@@ -558,6 +622,13 @@ func (c *Client) SuspendActor(ctx context.Context, atespace, actorName string) e
 		Actor: &ateapipb.ObjectRef{
 			Atespace: atespace,
 			Name:     actorName,
+		},
+		// Checkpoint a running actor durably before acknowledging the suspend.
+		// Substrate's default asynchronous upload can still be pending when
+		// the actor resumes, and RevertActor discards that copy. This does not
+		// promote an already-suspended actor's older node-local checkpoint.
+		Options: &ateapipb.SuspendOptions{
+			Mode: ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS,
 		},
 	}
 	err := retryOnCodes(ctx, func() error {
