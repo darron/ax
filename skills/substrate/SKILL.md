@@ -18,7 +18,7 @@ and `hack/setup-e2e-kind.sh` if they look stale.
 
 | Module | Pinned | Provides | Imported by |
 |---|---|---|---|
-| `go.ate.dev/substrate` | `v0.6.0` | Control API protos `pkg/proto/ateapipb` (atespaces, actor templates, actors, suspend/resume) | `internal/substrate`, `internal/server`, `internal/controller`, `test/e2e` |
+| `go.ate.dev/substrate` | `v1.0.0-rc.1` | Control API protos `api/ateapi/v1` (atespaces, actor templates, actors, suspend/resume) | `internal/substrate`, `internal/server`, `internal/controller`, `test/e2e` |
 | `github.com/agent-substrate/env` | `v0.0.11-0.20260912052224-4468a200b170` (pseudo-version) | Guest services served inside the sandbox (process exec + file system gRPC) and `proto/ateenv/v1alpha` | `internal/guest`, `internal/metadata` |
 
 There is no `replace` directive for either module. Local hacking against a
@@ -38,6 +38,12 @@ All Control API traffic goes through this package. It encapsulates:
 - **Helpers** the reconciler relies on — `EnsureAtespace`, `EnsureActorTemplateWithImage`,
   `EnsureActor`, `SuspendActor`, `ResumeActor`, `DeleteActor`, `WorkerIP`,
   `ResourceLimits`, `BuildActorTemplate`.
+
+The lab integration accepts an existing atespace after a denied create only
+when the subsequent read succeeds. `AX_WORKER_SELECTOR` scopes actor placement,
+and `AX_TASK_CAPABILITIES_ADD` adds the capabilities required by the task image.
+`SuspendActor` requests synchronous checkpoint durability before acknowledging
+suspend; worker-loss recovery must be qualified with the selected Substrate build.
 
 ### Where a new Control API call lives today
 

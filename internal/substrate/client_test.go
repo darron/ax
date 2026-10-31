@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/google/ax/pkg/apis/v1alpha1"
-	"go.ate.dev/substrate/pkg/proto/ateapipb"
+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,6 +44,57 @@ type mockControlClient struct {
 	templates           map[string]*ateapipb.ActorTemplate
 	createTemplateErrs  []error
 	createdTemplates    []*ateapipb.ActorTemplate
+	suspendCalls        []*ateapipb.SuspendActorRequest
+	suspendErrs         []error
+}
+
+func (m *mockControlClient) SuspendActor(ctx context.Context, req *ateapipb.SuspendActorRequest, opts ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.suspendCalls = append(m.suspendCalls, proto.Clone(req).(*ateapipb.SuspendActorRequest))
+	if len(m.suspendErrs) > 0 {
+		err := m.suspendErrs[0]
+		m.suspendErrs = m.suspendErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &ateapipb.SuspendActorResponse{}, nil
+}
+
+func TestSuspendActorRequestsDurableCheckpoint(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		errs  []error
+		calls int
+		fail  bool
+	}{
+		{name: "success", calls: 1},
+		{name: "retry", errs: []error{status.Error(codes.Aborted, "lease conflict"), status.Error(codes.Unavailable, "transport unavailable")}, calls: 3},
+		{name: "terminal failure", errs: []error{status.Error(codes.InvalidArgument, "invalid actor")}, calls: 1, fail: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			control := &mockControlClient{suspendErrs: tt.errs}
+			client := &Client{control: control}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			err := client.SuspendActor(ctx, "team", "task")
+			if (err != nil) != tt.fail {
+				t.Fatalf("SuspendActor error = %v, want failure %v", err, tt.fail)
+			}
+			if len(control.suspendCalls) != tt.calls {
+				t.Fatalf("SuspendActor calls = %d, want %d", len(control.suspendCalls), tt.calls)
+			}
+			for _, req := range control.suspendCalls {
+				if req.GetActor().GetAtespace() != "team" || req.GetActor().GetName() != "task" {
+					t.Fatalf("wrong actor: %v", req.GetActor())
+				}
+				if req.GetOptions().GetMode() != ateapipb.DurabilityMode_DURABILITY_MODE_SYNCHRONOUS {
+					t.Fatalf("suspend may acknowledge a node-local checkpoint: %v", req.GetOptions())
+				}
+			}
+		})
+	}
 }
 
 func (m *mockControlClient) GetActorTemplate(ctx context.Context, req *ateapipb.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {
