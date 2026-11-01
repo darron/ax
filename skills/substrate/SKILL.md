@@ -34,6 +34,10 @@ All Control API traffic goes through this package. It encapsulates:
 - **Auth** — bearer token from `SUBSTRATE_TOKEN_FILE` (in-cluster: projected SA
   token with audience `api.ate-system.svc`, see `deploy/ax-server.yaml`), CA
   from `SUBSTRATE_CA_FILE`.
+- **Preview opt-in** — `NewClientWithOptions` adds `ate-preview-allowed: true`
+  on unary and streaming control RPCs. AX templates set a per-template snapshot
+  location; Substrate RC1 also needs the server-side
+  `PerTemplateSnapshotLocation` gate. Request metadata alone never enables it.
 - **Retry** — `IsTransientError` + `retryOnCodes` for `Unavailable`-class errors.
 - **Helpers** the reconciler relies on — `EnsureAtespace`, `EnsureActorTemplateWithImage`,
   `EnsureActor`, `SuspendActor`, `ResumeActor`, `DeleteActor`, `WorkerIP`,
