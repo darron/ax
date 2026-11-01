@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -101,6 +102,12 @@ func NewClientWithOptions(opts ClientOptions, extraDialOpts ...grpc.DialOption) 
 	}
 
 	dialOpts := append([]grpc.DialOption{}, extraDialOpts...)
+	// AX templates use a per-template snapshot storage location. Substrate RC1
+	// requires explicit request opt-in in addition to its server preview gate.
+	dialOpts = append(dialOpts,
+		grpc.WithChainUnaryInterceptor(previewUnaryClientInterceptor),
+		grpc.WithChainStreamInterceptor(previewStreamClientInterceptor),
+	)
 
 	if opts.Plaintext {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -150,6 +157,16 @@ func NewClientWithOptions(opts ClientOptions, extraDialOpts ...grpc.DialOption) 
 		conn:    conn,
 		control: ateapipb.NewControlClient(conn),
 	}, nil
+}
+
+// Preview metadata is added on the control connection only. Append preserves
+// authentication, tracing and caller metadata; it does not enable server gates.
+func previewUnaryClientInterceptor(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	return invoker(metadata.AppendToOutgoingContext(ctx, "ate-preview-allowed", "true"), method, req, reply, cc, opts...)
+}
+
+func previewStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	return streamer(metadata.AppendToOutgoingContext(ctx, "ate-preview-allowed", "true"), desc, cc, method, opts...)
 }
 
 // NewClient establishes a connection to the Substrate Control API server.
