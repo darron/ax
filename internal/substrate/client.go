@@ -374,6 +374,18 @@ func workerSelectorFromEnv() *ateapipb.Selector {
 	return &ateapipb.Selector{MatchLabels: labels}
 }
 
+// goldenSnapshotConfigFromEnv reads AX_GOLDEN_SNAPSHOTS. "disabled" turns off
+// the golden actor Substrate otherwise builds for every template. Each task
+// gets its own template, so the golden snapshot is never reused, while its
+// actor needs a worker slot as large as the task's. Any other value keeps
+// Substrate's default.
+func goldenSnapshotConfigFromEnv() *ateapipb.GoldenSnapshotConfig {
+	if strings.TrimSpace(os.Getenv("AX_GOLDEN_SNAPSHOTS")) != "disabled" {
+		return nil
+	}
+	return &ateapipb.GoldenSnapshotConfig{Mode: ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED}
+}
+
 // capabilityName is a Linux capability without its CAP_ prefix, as Substrate's
 // ateapi.Capabilities expects. "ALL" is not a capability name.
 var capabilityName = regexp.MustCompile(`^[A-Z][A-Z_]*[A-Z]$`)
@@ -473,8 +485,9 @@ func BuildActorTemplate(atespace, name, image string, envMap map[string]string, 
 		}},
 		WorkerSelector: workerSelectorFromEnv(),
 		SnapshotConfig: &ateapipb.SnapshotConfig{
-			StorageLocation:   snapshotsBucket,
-			PreferredFidelity: ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			StorageLocation:      snapshotsBucket,
+			PreferredFidelity:    ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			GoldenSnapshotConfig: goldenSnapshotConfigFromEnv(),
 		},
 		Resources: &ateapipb.ResourceRequirements{
 			Limits: &ateapipb.Resources{

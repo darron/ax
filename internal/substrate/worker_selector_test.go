@@ -17,6 +17,8 @@ package substrate
 import (
 	"reflect"
 	"testing"
+
+	ateapipb "go.ate.dev/substrate/api/ateapi/v1"
 )
 
 func TestWorkerSelectorFromEnv(t *testing.T) {
@@ -42,5 +44,33 @@ func TestWorkerSelectorFromEnv(t *testing.T) {
 	tmpl := BuildActorTemplate("ax-lab", "t", "img", nil, nil, "gs://b/", nil)
 	if got := tmpl.GetWorkerSelector().GetMatchLabels()["sbx-pool"]; got != "ax" {
 		t.Errorf("template worker selector = %q, want ax", got)
+	}
+}
+
+func TestGoldenSnapshotConfigFromEnv(t *testing.T) {
+	for _, tc := range []struct {
+		raw          string
+		wantDisabled bool
+	}{
+		{"", false},
+		{"disabled", true},
+		{" disabled ", true},
+		{"enabled", false},
+		{"Disabled", false},
+	} {
+		t.Setenv("AX_GOLDEN_SNAPSHOTS", tc.raw)
+		tmpl := BuildActorTemplate("ax-lab", "t", "img", nil, nil, "gs://b/", nil)
+		got := tmpl.GetSnapshotConfig().GetGoldenSnapshotConfig()
+		if tc.wantDisabled {
+			if got.GetMode() != ateapipb.GoldenSnapshotMode_GOLDEN_SNAPSHOT_MODE_DISABLED {
+				t.Errorf("AX_GOLDEN_SNAPSHOTS=%q: mode = %v, want DISABLED", tc.raw, got.GetMode())
+			}
+		} else if got != nil {
+			// Unset keeps Substrate's server-side default (enabled).
+			t.Errorf("AX_GOLDEN_SNAPSHOTS=%q: golden config = %v, want nil", tc.raw, got)
+		}
+		if tmpl.GetSnapshotConfig().GetStorageLocation() != "gs://b/" {
+			t.Errorf("AX_GOLDEN_SNAPSHOTS=%q: storage location changed", tc.raw)
+		}
 	}
 }
