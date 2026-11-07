@@ -375,10 +375,12 @@ func workerSelectorFromEnv() *ateapipb.Selector {
 }
 
 // goldenSnapshotConfigFromEnv reads AX_GOLDEN_SNAPSHOTS. "disabled" turns off
-// the golden actor Substrate otherwise builds for every template. Each task
-// gets its own template, so the golden snapshot is never reused, while its
-// actor needs a worker slot as large as the task's. Any other value keeps
-// Substrate's default.
+// the golden actor Substrate otherwise builds for every template, which needs
+// a worker slot as large as the task's. Each task gets its own template, so
+// the golden snapshot is reused only if EnsureActor deletes and recreates a
+// crashed actor it could not revert; that recreated actor then boots without
+// it, losing only its faster cold start. Any other value keeps Substrate's
+// default.
 func goldenSnapshotConfigFromEnv() *ateapipb.GoldenSnapshotConfig {
 	if strings.TrimSpace(os.Getenv("AX_GOLDEN_SNAPSHOTS")) != "disabled" {
 		return nil

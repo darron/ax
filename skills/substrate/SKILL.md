@@ -46,6 +46,10 @@ All Control API traffic goes through this package. It encapsulates:
 The lab integration accepts an existing atespace after a denied create only
 when the subsequent read succeeds. `AX_WORKER_SELECTOR` scopes actor placement,
 and `AX_TASK_CAPABILITIES_ADD` adds the capabilities required by the task image.
+`AX_GOLDEN_SNAPSHOTS=disabled` (exact value after trimming spaces) sets
+`goldenSnapshotConfig.mode: DISABLED` on task templates. Unset or any other
+value leaves the field nil, so Substrate's default (enabled) applies. The
+snapshot storage location and volume fidelity are unchanged either way.
 `SuspendActor` requests synchronous checkpoint durability before acknowledging
 suspend; worker-loss recovery must be qualified with the selected Substrate build.
 
