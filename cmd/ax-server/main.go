@@ -87,6 +87,11 @@ func main() {
 		"defaultTaskImage", defaultTaskImage,
 	)
 
+	if err := substrate.ValidateSnapshotFidelityEnv(); err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
+	}
+
 	openCtx, openCancel := context.WithTimeout(context.Background(), time.Minute)
 	backend, err := postgres.Open(openCtx, storeURL, postgres.Options{})
 	openCancel()

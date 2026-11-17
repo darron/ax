@@ -374,6 +374,47 @@ func workerSelectorFromEnv() *ateapipb.Selector {
 	return &ateapipb.Selector{MatchLabels: labels}
 }
 
+// ParseSnapshotFidelity parses an AX_SNAPSHOT_FIDELITY value: "volumes" (the
+// default when empty), "rootfs" or "memory", case-insensitive. VOLUMES keeps
+// only the /workspace DurableDir across suspend; ROOTFS also keeps every
+// root-filesystem write since boot (home, installed packages, caches) and
+// cold-boots with them back in place; MEMORY also keeps process memory.
+// Substrate treats the value as a best-effort ceiling and may package less.
+// Any other value is an error.
+func ParseSnapshotFidelity(raw string) (ateapipb.SnapshotFidelity, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "volumes":
+		return ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES, nil
+	case "rootfs":
+		return ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_ROOTFS, nil
+	case "memory":
+		return ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_MEMORY, nil
+	}
+	return ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_UNSPECIFIED,
+		fmt.Errorf("AX_SNAPSHOT_FIDELITY=%q: want volumes, rootfs or memory", raw)
+}
+
+// ValidateSnapshotFidelityEnv rejects an unrecognized AX_SNAPSHOT_FIDELITY.
+// ax-server calls it at startup, so a bad value stops the server instead of
+// silently changing what suspend keeps.
+func ValidateSnapshotFidelityEnv() error {
+	_, err := ParseSnapshotFidelity(os.Getenv("AX_SNAPSHOT_FIDELITY"))
+	return err
+}
+
+// snapshotFidelityFromEnv is the template's preferred fidelity. An invalid
+// value cannot reach here in ax-server (ValidateSnapshotFidelityEnv at
+// startup); other callers fall back to VOLUMES, the behaviour before this
+// setting existed.
+func snapshotFidelityFromEnv() ateapipb.SnapshotFidelity {
+	f, err := ParseSnapshotFidelity(os.Getenv("AX_SNAPSHOT_FIDELITY"))
+	if err != nil {
+		slog.Warn("ignoring invalid snapshot fidelity; using volumes", "error", err)
+		return ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES
+	}
+	return f
+}
+
 // goldenSnapshotConfigFromEnv reads AX_GOLDEN_SNAPSHOTS. "disabled" turns off
 // the golden actor Substrate otherwise builds for every template, which needs
 // a worker slot as large as the task's. Each task gets its own template, so
@@ -488,7 +529,7 @@ func BuildActorTemplate(atespace, name, image string, envMap map[string]string, 
 		WorkerSelector: workerSelectorFromEnv(),
 		SnapshotConfig: &ateapipb.SnapshotConfig{
 			StorageLocation:      snapshotsBucket,
-			PreferredFidelity:    ateapipb.SnapshotFidelity_SNAPSHOT_FIDELITY_VOLUMES,
+			PreferredFidelity:    snapshotFidelityFromEnv(),
 			GoldenSnapshotConfig: goldenSnapshotConfigFromEnv(),
 		},
 		Resources: &ateapipb.ResourceRequirements{
