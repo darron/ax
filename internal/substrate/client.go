@@ -184,6 +184,21 @@ func (c *Client) Close() error {
 
 // EnsureAtespace creates the atespace if it does not already exist.
 func (c *Client) EnsureAtespace(ctx context.Context, atespace string) error {
+	// Atespace editors may use an existing atespace but cannot create one.
+	// Check first so the common existing-atespace path does not require global
+	// can_create_atespace permission.
+	_, err := callWithRetry(ctx, func() (*ateapipb.Atespace, error) {
+		return c.control.GetAtespace(ctx, &ateapipb.GetAtespaceRequest{
+			Atespace: &ateapipb.ObjectRef{Name: atespace},
+		})
+	})
+	if err == nil {
+		return nil
+	}
+	if status.Code(err) != codes.NotFound {
+		return fmt.Errorf("checking atespace %q: %w", atespace, err)
+	}
+
 	req := &ateapipb.CreateAtespaceRequest{
 		Atespace: &ateapipb.Atespace{
 			Metadata: &ateapipb.ResourceMetadata{
@@ -191,7 +206,7 @@ func (c *Client) EnsureAtespace(ctx context.Context, atespace string) error {
 			},
 		},
 	}
-	_, err := callWithRetry(ctx, func() (*ateapipb.Atespace, error) {
+	_, err = callWithRetry(ctx, func() (*ateapipb.Atespace, error) {
 		return c.control.CreateAtespace(ctx, req)
 	})
 	if err != nil && status.Code(err) != codes.AlreadyExists {
