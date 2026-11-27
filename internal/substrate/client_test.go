@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +44,10 @@ type mockControlClient struct {
 	getCalls                   []*ateapipb.GetActorRequest
 	deleteErr                  error
 	actorRemaining             int // Number of GetActor calls before returning NotFound
+	actorRemainingSelector     *ateapipb.Selector
+	existingActor              *ateapipb.Actor
+	revertActorErr             error
+	revertActorCalls           int
 	resumeErrs                 []error
 	resumeActor                *ateapipb.Actor
 	deleteTemplateErrs         []error
@@ -253,6 +258,7 @@ func (m *mockControlClient) DeleteActor(ctx context.Context, req *ateapipb.Delet
 	if m.deleteErr != nil {
 		return nil, m.deleteErr
 	}
+	m.existingActor = nil
 	return &ateapipb.Actor{}, nil
 }
 
@@ -260,6 +266,9 @@ func (m *mockControlClient) GetActor(ctx context.Context, req *ateapipb.GetActor
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.getCalls = append(m.getCalls, req)
+	if m.existingActor != nil {
+		return proto.Clone(m.existingActor).(*ateapipb.Actor), nil
+	}
 	if m.actorRemaining > 0 {
 		m.actorRemaining--
 		return &ateapipb.Actor{
@@ -267,10 +276,21 @@ func (m *mockControlClient) GetActor(ctx context.Context, req *ateapipb.GetActor
 				Atespace: req.GetActor().GetAtespace(),
 				Name:     req.GetActor().GetName(),
 			},
-			Status: &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_DELETING},
+			WorkerSelector: m.actorRemainingSelector,
+			Status:         &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_DELETING},
 		}, nil
 	}
 	return nil, status.Error(codes.NotFound, "actor not found")
+}
+
+func (m *mockControlClient) RevertActor(ctx context.Context, req *ateapipb.RevertActorRequest, opts ...grpc.CallOption) (*ateapipb.RevertActorResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.revertActorCalls++
+	if m.revertActorErr != nil {
+		return nil, m.revertActorErr
+	}
+	return &ateapipb.RevertActorResponse{Actor: proto.Clone(m.existingActor).(*ateapipb.Actor)}, nil
 }
 
 func (m *mockControlClient) CreateActor(ctx context.Context, req *ateapipb.CreateActorRequest, opts ...grpc.CallOption) (*ateapipb.Actor, error) {
@@ -285,6 +305,211 @@ func (m *mockControlClient) CreateActor(ctx context.Context, req *ateapipb.Creat
 	}
 	m.createdActors = append(m.createdActors, req.GetActor())
 	return req.GetActor(), nil
+}
+
+func TestClient_NewClientWithOptionsClonesWorkerSelector(t *testing.T) {
+	labels := map[string]string{"pool": "isolated"}
+	client, err := NewClientWithOptions(ClientOptions{
+		Target:         "passthrough:///unused",
+		Plaintext:      true,
+		WorkerSelector: labels,
+	})
+	if err != nil {
+		t.Fatalf("NewClientWithOptions: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	labels["pool"] = "changed"
+	if got := client.workerSelector["pool"]; got != "isolated" {
+		t.Fatalf("client selector = %q, want isolated after caller map mutation", got)
+	}
+}
+
+func TestClient_EnsureActorWorkerSelector(t *testing.T) {
+	selector := map[string]string{"pool": "isolated"}
+	control := &mockControlClient{}
+	client := &Client{control: control, workerSelector: map[string]string{"pool": "isolated"}}
+
+	actor, err := client.EnsureActor(context.Background(), "default", "task-1", "default", "ax-template")
+	if err != nil {
+		t.Fatalf("EnsureActor: %v", err)
+	}
+	want := &ateapipb.Selector{MatchLabels: selector}
+	if !proto.Equal(actor.GetWorkerSelector(), want) {
+		t.Fatalf("created actor selector = %v, want %v", actor.GetWorkerSelector(), want)
+	}
+	if len(control.createdActors) != 1 {
+		t.Fatalf("CreateActor calls = %d, want 1", len(control.createdActors))
+	}
+	if !proto.Equal(control.createdActors[0].GetWorkerSelector(), want) {
+		t.Fatalf("CreateActor selector = %v, want %v", control.createdActors[0].GetWorkerSelector(), want)
+	}
+
+	actor.GetWorkerSelector().GetMatchLabels()["pool"] = "mutated"
+	if got := client.workerSelector["pool"]; got != "isolated" {
+		t.Fatalf("actor selector mutation changed client config to %q", got)
+	}
+}
+
+func TestClient_EnsureActorWorkerSelectorDefaultsToAnyPool(t *testing.T) {
+	control := &mockControlClient{}
+	client := &Client{control: control}
+
+	actor, err := client.EnsureActor(context.Background(), "default", "task-1", "default", "ax-template")
+	if err != nil {
+		t.Fatalf("EnsureActor: %v", err)
+	}
+	if actor.GetWorkerSelector() != nil {
+		t.Fatalf("created actor selector = %v, want nil for default empty selector", actor.GetWorkerSelector())
+	}
+	if len(control.createdActors) != 1 {
+		t.Fatalf("CreateActor calls = %d, want 1", len(control.createdActors))
+	}
+	if control.createdActors[0].GetWorkerSelector() != nil {
+		t.Fatalf("CreateActor selector = %v, want nil for default empty selector", control.createdActors[0].GetWorkerSelector())
+	}
+}
+
+func TestClient_EnsureActorRejectsExistingSelectorMismatchBeforeRecovery(t *testing.T) {
+	want := &ateapipb.Selector{MatchLabels: map[string]string{"pool": "isolated"}}
+	tests := []struct {
+		name           string
+		configured     map[string]string
+		existingWorker *ateapipb.Selector
+	}{
+		{
+			name:           "different selector",
+			configured:     want.GetMatchLabels(),
+			existingWorker: &ateapipb.Selector{MatchLabels: map[string]string{"pool": "general"}},
+		},
+		{name: "missing selector", configured: want.GetMatchLabels()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := &mockControlClient{
+				createActorErrs: []error{status.Error(codes.AlreadyExists, "actor already exists")},
+				existingActor: &ateapipb.Actor{
+					WorkerSelector: tt.existingWorker,
+					Status:         &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_CRASHED},
+				},
+			}
+			client := &Client{control: control, workerSelector: tt.configured}
+
+			_, err := client.EnsureActor(context.Background(), "default", "task-1", "default", "ax-template")
+			if err == nil || !strings.Contains(err.Error(), "worker selector") {
+				t.Fatalf("EnsureActor error = %v, want worker selector mismatch", err)
+			}
+			if got := control.revertActorCalls; got != 0 {
+				t.Errorf("RevertActor calls = %d, want 0 before rejecting the selector mismatch", got)
+			}
+			if got := len(control.deleteCalls); got != 0 {
+				t.Errorf("DeleteActor calls = %d, want 0 before rejecting the selector mismatch", got)
+			}
+			if got := len(control.createdActors); got != 0 {
+				t.Errorf("successful CreateActor calls = %d, want 0", got)
+			}
+		})
+	}
+}
+
+func TestClient_EnsureActorReusesMatchingWorkerSelector(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured map[string]string
+		actor      *ateapipb.Selector
+	}{
+		{
+			name:       "constrained selector",
+			configured: map[string]string{"pool": "isolated"},
+			actor:      &ateapipb.Selector{MatchLabels: map[string]string{"pool": "isolated"}},
+		},
+		{name: "default empty selector", actor: nil},
+		{
+			name:  "default preserves a previously constrained actor",
+			actor: &ateapipb.Selector{MatchLabels: map[string]string{"pool": "legacy"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := &mockControlClient{
+				createActorErrs: []error{status.Error(codes.AlreadyExists, "actor already exists")},
+				existingActor:   &ateapipb.Actor{WorkerSelector: tt.actor},
+			}
+			client := &Client{control: control, workerSelector: tt.configured}
+
+			actor, err := client.EnsureActor(context.Background(), "default", "task-1", "default", "ax-template")
+			if err != nil {
+				t.Fatalf("EnsureActor with matching selector: %v", err)
+			}
+			if !proto.Equal(actor.GetWorkerSelector(), tt.actor) {
+				t.Errorf("reused actor selector = %v, want %v", actor.GetWorkerSelector(), tt.actor)
+			}
+			if got := len(control.createdActors); got != 0 {
+				t.Errorf("successful CreateActor calls = %d, want 0 when reusing", got)
+			}
+		})
+	}
+}
+
+func TestClient_EnsureActorRecreationPreservesWorkerSelector(t *testing.T) {
+	oldRetry, oldWait := defaultRetryInterval, actorDeletingWaitInterval
+	defaultRetryInterval, actorDeletingWaitInterval = time.Millisecond, time.Millisecond
+	defer func() {
+		defaultRetryInterval, actorDeletingWaitInterval = oldRetry, oldWait
+	}()
+
+	want := &ateapipb.Selector{MatchLabels: map[string]string{"pool": "isolated"}}
+	control := &mockControlClient{
+		actorRemaining:         1,
+		actorRemainingSelector: want,
+		createActorErrs:        []error{status.Error(codes.AlreadyExists, "actor deleting"), nil},
+	}
+	client := &Client{control: control, workerSelector: map[string]string{"pool": "isolated"}}
+
+	actor, err := client.EnsureActorFromTag(context.Background(), "default", "task-1", "default", "ax-template", "workspace-tag")
+	if err != nil {
+		t.Fatalf("EnsureActorFromTag during deleting actor recreation: %v", err)
+	}
+	if !proto.Equal(actor.GetWorkerSelector(), want) {
+		t.Fatalf("recreated actor selector = %v, want %v", actor.GetWorkerSelector(), want)
+	}
+	if len(control.createdActors) != 1 {
+		t.Fatalf("recreated CreateActor calls = %d, want 1", len(control.createdActors))
+	}
+	if !proto.Equal(control.createdActors[0].GetWorkerSelector(), want) {
+		t.Fatalf("recreated CreateActor selector = %v, want %v", control.createdActors[0].GetWorkerSelector(), want)
+	}
+}
+
+func TestClient_EnsureActorCrashedRecreationPreservesWorkerSelector(t *testing.T) {
+	oldRetry := defaultRetryInterval
+	defaultRetryInterval = time.Millisecond
+	defer func() { defaultRetryInterval = oldRetry }()
+
+	want := &ateapipb.Selector{MatchLabels: map[string]string{"pool": "isolated"}}
+	control := &mockControlClient{
+		createActorErrs: []error{status.Error(codes.AlreadyExists, "actor already exists"), nil},
+		existingActor: &ateapipb.Actor{
+			WorkerSelector: want,
+			Status:         &ateapipb.ActorStatus{State: ateapipb.ActorState_ACTOR_STATE_CRASHED},
+		},
+		revertActorErr: status.Error(codes.FailedPrecondition, "no snapshot to revert"),
+	}
+	client := &Client{control: control, workerSelector: map[string]string{"pool": "isolated"}}
+
+	actor, err := client.EnsureActor(context.Background(), "default", "task-1", "default", "ax-template")
+	if err != nil {
+		t.Fatalf("EnsureActor after failed crash recovery: %v", err)
+	}
+	if !proto.Equal(actor.GetWorkerSelector(), want) {
+		t.Fatalf("recreated actor selector = %v, want %v", actor.GetWorkerSelector(), want)
+	}
+	if len(control.createdActors) != 1 {
+		t.Fatalf("recreated CreateActor calls = %d, want 1", len(control.createdActors))
+	}
+	if !proto.Equal(control.createdActors[0].GetWorkerSelector(), want) {
+		t.Fatalf("recreated CreateActor selector = %v, want %v", control.createdActors[0].GetWorkerSelector(), want)
+	}
 }
 
 func (m *mockControlClient) CreateTag(ctx context.Context, req *ateapipb.CreateTagRequest, opts ...grpc.CallOption) (*ateapipb.Tag, error) {

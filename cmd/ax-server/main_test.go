@@ -15,6 +15,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,33 @@ func TestValidateRunnerVolumeImage(t *testing.T) {
 		if err := validateRunnerVolumeImage(tt.image); (err != nil) != tt.wantErr {
 			t.Errorf("validateRunnerVolumeImage(%q) = %v, want error: %v", tt.image, err, tt.wantErr)
 		}
+	}
+}
+
+func TestParseWorkerSelector(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    map[string]string
+		wantErr bool
+	}{
+		{name: "empty selector"},
+		{name: "label and value", input: "pool=isolated", want: map[string]string{"pool": "isolated"}},
+		{name: "missing value", input: "pool=", wantErr: true},
+		{name: "missing key", input: "=isolated", wantErr: true},
+		{name: "missing equals", input: "isolated", wantErr: true},
+		{name: "multiple equals", input: "pool=isolated=extra", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseWorkerSelector(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseWorkerSelector(%q) error = %v, want error %v", tt.input, err, tt.wantErr)
+			}
+			if err == nil && !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("parseWorkerSelector(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
