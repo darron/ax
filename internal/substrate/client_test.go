@@ -33,28 +33,65 @@ import (
 type mockControlClient struct {
 	ateapipb.ControlClient
 
-	mu                  sync.Mutex
-	deleteCalls         []*ateapipb.DeleteActorRequest
-	getCalls            []*ateapipb.GetActorRequest
-	deleteErr           error
-	actorRemaining      int // Number of GetActor calls before returning NotFound
-	resumeErrs          []error
-	resumeActor         *ateapipb.Actor
-	deleteTemplateErrs  []error
-	deleteTemplateCalls int
-	templates           map[string]*ateapipb.ActorTemplate
-	createTemplateErrs  []error
-	createdTemplates    []*ateapipb.ActorTemplate
-	createPolicyErr     error
-	createPolicyErrs    []error
-	createPolicyCalls   int
-	createActorErrs     []error
-	createdActors       []*ateapipb.Actor
-	tags                map[string]*ateapipb.Tag
-	createTagErrs       []error
-	deleteTagErrs       []error
-	deleteTagCalls      int
-	suspendCalls        []*ateapipb.SuspendActorRequest
+	mu                         sync.Mutex
+	atespaces                  map[string]*ateapipb.Atespace
+	getAtespaceCalls           []*ateapipb.GetAtespaceRequest
+	createAtespaceCalls        []*ateapipb.CreateAtespaceRequest
+	createAtespaceErr          error
+	createAtespaceBeforeDenied bool
+	deleteCalls                []*ateapipb.DeleteActorRequest
+	getCalls                   []*ateapipb.GetActorRequest
+	deleteErr                  error
+	actorRemaining             int // Number of GetActor calls before returning NotFound
+	resumeErrs                 []error
+	resumeActor                *ateapipb.Actor
+	deleteTemplateErrs         []error
+	deleteTemplateCalls        int
+	templates                  map[string]*ateapipb.ActorTemplate
+	createTemplateErrs         []error
+	createdTemplates           []*ateapipb.ActorTemplate
+	createPolicyErr            error
+	createPolicyErrs           []error
+	createPolicyCalls          int
+	createActorErrs            []error
+	createdActors              []*ateapipb.Actor
+	tags                       map[string]*ateapipb.Tag
+	createTagErrs              []error
+	deleteTagErrs              []error
+	deleteTagCalls             int
+	suspendCalls               []*ateapipb.SuspendActorRequest
+}
+
+func (m *mockControlClient) GetAtespace(ctx context.Context, req *ateapipb.GetAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.getAtespaceCalls = append(m.getAtespaceCalls, req)
+	if atespace, ok := m.atespaces[req.GetAtespace().GetName()]; ok {
+		return atespace, nil
+	}
+	return nil, status.Error(codes.NotFound, "atespace not found")
+}
+
+func (m *mockControlClient) CreateAtespace(ctx context.Context, req *ateapipb.CreateAtespaceRequest, opts ...grpc.CallOption) (*ateapipb.Atespace, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.createAtespaceCalls = append(m.createAtespaceCalls, req)
+	if m.createAtespaceErr != nil {
+		if m.createAtespaceBeforeDenied {
+			if m.atespaces == nil {
+				m.atespaces = make(map[string]*ateapipb.Atespace)
+			}
+			atespace := req.GetAtespace()
+			m.atespaces[atespace.GetMetadata().GetName()] = atespace
+		}
+		return nil, m.createAtespaceErr
+	}
+	if m.atespaces == nil {
+		m.atespaces = make(map[string]*ateapipb.Atespace)
+	}
+	atespace := req.GetAtespace()
+	m.atespaces[atespace.GetMetadata().GetName()] = atespace
+	return atespace, nil
 }
 
 func (m *mockControlClient) SuspendActor(ctx context.Context, req *ateapipb.SuspendActorRequest, opts ...grpc.CallOption) (*ateapipb.SuspendActorResponse, error) {
@@ -79,6 +116,83 @@ func (m *mockControlClient) CreateActorEgressPolicy(ctx context.Context, req *at
 		return nil, m.createPolicyErr
 	}
 	return req.GetEgressPolicy(), nil
+}
+
+func TestClient_EnsureAtespace_ExistingAtespaceDoesNotRequireCreatePermission(t *testing.T) {
+	const atespaceName = "team-space"
+	control := &mockControlClient{
+		atespaces: map[string]*ateapipb.Atespace{
+			atespaceName: {Metadata: &ateapipb.ResourceMetadata{Name: atespaceName}},
+		},
+		createAtespaceErr: status.Error(codes.PermissionDenied, "requires global create permission"),
+	}
+	client := &Client{control: control}
+
+	if err := client.EnsureAtespace(context.Background(), atespaceName); err != nil {
+		t.Fatalf("EnsureAtespace for existing space failed: %v", err)
+	}
+	if got := len(control.getAtespaceCalls); got != 1 {
+		t.Errorf("GetAtespace calls = %d, want 1", got)
+	}
+	if got := len(control.createAtespaceCalls); got != 0 {
+		t.Errorf("CreateAtespace calls = %d, want 0 for an existing space", got)
+	}
+}
+
+func TestClient_EnsureAtespace_CreatesMissingAtespace(t *testing.T) {
+	const atespaceName = "new-space"
+	control := &mockControlClient{}
+	client := &Client{control: control}
+
+	if err := client.EnsureAtespace(context.Background(), atespaceName); err != nil {
+		t.Fatalf("EnsureAtespace for missing space failed: %v", err)
+	}
+	if got := len(control.getAtespaceCalls); got != 1 {
+		t.Errorf("GetAtespace calls = %d, want 1", got)
+	}
+	if got := len(control.createAtespaceCalls); got != 1 {
+		t.Fatalf("CreateAtespace calls = %d, want 1", got)
+	}
+	if got := control.createAtespaceCalls[0].GetAtespace().GetMetadata().GetName(); got != atespaceName {
+		t.Errorf("created atespace name = %q, want %q", got, atespaceName)
+	}
+}
+
+func TestClient_EnsureAtespace_AcceptsConcurrentCreationAfterPermissionDenied(t *testing.T) {
+	const atespaceName = "concurrent-space"
+	control := &mockControlClient{
+		createAtespaceErr:          status.Error(codes.PermissionDenied, "requires global create permission"),
+		createAtespaceBeforeDenied: true,
+	}
+	client := &Client{control: control}
+
+	if err := client.EnsureAtespace(context.Background(), atespaceName); err != nil {
+		t.Fatalf("EnsureAtespace after concurrent creation failed: %v", err)
+	}
+	if got := len(control.getAtespaceCalls); got != 2 {
+		t.Errorf("GetAtespace calls = %d, want 2", got)
+	}
+	if got := len(control.createAtespaceCalls); got != 1 {
+		t.Errorf("CreateAtespace calls = %d, want 1", got)
+	}
+}
+
+func TestClient_EnsureAtespace_MissingAtespaceStillRequiresCreatePermission(t *testing.T) {
+	control := &mockControlClient{
+		createAtespaceErr: status.Error(codes.PermissionDenied, "requires global create permission"),
+	}
+	client := &Client{control: control}
+
+	err := client.EnsureAtespace(context.Background(), "missing-space")
+	if status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("EnsureAtespace error = %v, want PermissionDenied", err)
+	}
+	if got := len(control.getAtespaceCalls); got != 2 {
+		t.Errorf("GetAtespace calls = %d, want 2 to check for a concurrent creation", got)
+	}
+	if got := len(control.createAtespaceCalls); got != 1 {
+		t.Errorf("CreateAtespace calls = %d, want 1", got)
+	}
 }
 
 func (m *mockControlClient) GetActorTemplate(ctx context.Context, req *ateapipb.GetActorTemplateRequest, opts ...grpc.CallOption) (*ateapipb.ActorTemplate, error) {

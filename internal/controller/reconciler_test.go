@@ -106,6 +106,16 @@ func (m *mockControlServer) CreateActorTemplate(_ context.Context, req *ateapipb
 	return tmpl, nil
 }
 
+func (m *mockControlServer) GetAtespace(_ context.Context, req *ateapipb.GetAtespaceRequest) (*ateapipb.Atespace, error) {
+	name := req.GetAtespace().GetName()
+	for _, created := range m.createdAtespaces {
+		if created == name {
+			return &ateapipb.Atespace{Metadata: &ateapipb.ResourceMetadata{Name: name}}, nil
+		}
+	}
+	return nil, status.Error(codes.NotFound, "atespace not found")
+}
+
 func (m *mockControlServer) CreateAtespace(ctx context.Context, req *ateapipb.CreateAtespaceRequest) (*ateapipb.Atespace, error) {
 	if m.createAtespaceErr != nil {
 		return nil, m.createAtespaceErr
