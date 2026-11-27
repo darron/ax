@@ -36,6 +36,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -103,6 +104,12 @@ func NewClientWithOptions(opts ClientOptions, extraDialOpts ...grpc.DialOption) 
 	}
 
 	dialOpts := append([]grpc.DialOption{}, extraDialOpts...)
+	// AX templates use a per-template snapshot storage location. Substrate RC1
+	// requires explicit request opt-in in addition to its server preview gate.
+	dialOpts = append(dialOpts,
+		grpc.WithChainUnaryInterceptor(previewUnaryClientInterceptor),
+		grpc.WithChainStreamInterceptor(previewStreamClientInterceptor),
+	)
 
 	if opts.Plaintext {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -154,6 +161,16 @@ func NewClientWithOptions(opts ClientOptions, extraDialOpts ...grpc.DialOption) 
 	}, nil
 }
 
+// Preview metadata is added on the control connection only. Append preserves
+// authentication, tracing and caller metadata; it does not enable server gates.
+func previewUnaryClientInterceptor(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+	return invoker(metadata.AppendToOutgoingContext(ctx, "ate-preview-allowed", "true"), method, req, reply, cc, opts...)
+}
+
+func previewStreamClientInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	return streamer(metadata.AppendToOutgoingContext(ctx, "ate-preview-allowed", "true"), desc, cc, method, opts...)
+}
+
 // NewClient establishes a connection to the Substrate Control API server.
 func NewClient(target string, opts ...grpc.DialOption) (*Client, error) {
 	if len(opts) > 0 {
@@ -184,6 +201,21 @@ func (c *Client) Close() error {
 
 // EnsureAtespace creates the atespace if it does not already exist.
 func (c *Client) EnsureAtespace(ctx context.Context, atespace string) error {
+	// An editor of an existing atespace may use it but cannot create atespaces.
+	// Check first so this path does not require global create permission.
+	err := retryOnCodes(ctx, func() error {
+		_, err := c.control.GetAtespace(ctx, &ateapipb.GetAtespaceRequest{
+			Atespace: &ateapipb.ObjectRef{Name: atespace},
+		})
+		return err
+	}, codes.Unavailable)
+	if err == nil {
+		return nil
+	}
+	if status.Code(err) != codes.NotFound {
+		return fmt.Errorf("checking atespace %q: %w", atespace, err)
+	}
+
 	req := &ateapipb.CreateAtespaceRequest{
 		Atespace: &ateapipb.Atespace{
 			Metadata: &ateapipb.ResourceMetadata{
@@ -191,9 +223,19 @@ func (c *Client) EnsureAtespace(ctx context.Context, atespace string) error {
 			},
 		},
 	}
-	_, err := callWithRetry(ctx, func() (*ateapipb.Atespace, error) {
+	_, err = callWithRetry(ctx, func() (*ateapipb.Atespace, error) {
 		return c.control.CreateAtespace(ctx, req)
 	})
+	if err != nil && status.Code(err) == codes.PermissionDenied {
+		// Another owner may have created the atespace after the initial Get.
+		if _, getErr := callWithRetry(ctx, func() (*ateapipb.Atespace, error) {
+			return c.control.GetAtespace(ctx, &ateapipb.GetAtespaceRequest{
+				Atespace: &ateapipb.ObjectRef{Name: atespace},
+			})
+		}); getErr == nil {
+			return nil
+		}
+	}
 	if err != nil && status.Code(err) != codes.AlreadyExists {
 		return fmt.Errorf("creating atespace %q: %w", atespace, err)
 	}

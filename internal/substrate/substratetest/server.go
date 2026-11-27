@@ -52,7 +52,8 @@ type Errors struct {
 type Server struct {
 	ateapipb.UnimplementedControlServer
 
-	client *substrate.Client
+	client   *substrate.Client
+	endpoint string
 
 	mu               sync.Mutex
 	atespaces        map[string]*ateapipb.Atespace
@@ -68,7 +69,7 @@ type Server struct {
 }
 
 // NewServer starts a Server with nothing in it. It stops when the test ends.
-func NewServer(tb testing.TB) *Server {
+func NewServer(tb testing.TB, options ...grpc.ServerOption) *Server {
 	tb.Helper()
 	s := &Server{
 		atespaces:      make(map[string]*ateapipb.Atespace),
@@ -81,7 +82,7 @@ func NewServer(tb testing.TB) *Server {
 	if err != nil {
 		tb.Fatalf("listen: %v", err)
 	}
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(options...)
 	ateapipb.RegisterControlServer(grpcServer, s)
 	go func() { _ = grpcServer.Serve(lis) }()
 	tb.Cleanup(grpcServer.Stop)
@@ -91,8 +92,12 @@ func NewServer(tb testing.TB) *Server {
 	}
 	tb.Cleanup(func() { _ = c.Close() })
 	s.client = c
+	s.endpoint = lis.Addr().String()
 	return s
 }
+
+// Endpoint returns the loopback test server address.
+func (s *Server) Endpoint() string { return s.endpoint }
 
 // Client returns a client connected to s.
 func (s *Server) Client() *substrate.Client {
@@ -220,6 +225,17 @@ func (s *Server) CreateAtespace(_ context.Context, req *ateapipb.CreateAtespaceR
 	}
 	atespace := proto.Clone(req.GetAtespace()).(*ateapipb.Atespace)
 	s.atespaces[name] = atespace
+	return proto.Clone(atespace).(*ateapipb.Atespace), nil
+}
+
+func (s *Server) GetAtespace(_ context.Context, req *ateapipb.GetAtespaceRequest) (*ateapipb.Atespace, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := req.GetAtespace().GetName()
+	atespace, ok := s.atespaces[name]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "atespace %s not found", name)
+	}
 	return proto.Clone(atespace).(*ateapipb.Atespace), nil
 }
 
