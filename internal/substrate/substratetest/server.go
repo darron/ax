@@ -184,6 +184,17 @@ func (s *Server) CreateAtespace(_ context.Context, req *ateapipb.CreateAtespaceR
 	return proto.Clone(atespace).(*ateapipb.Atespace), nil
 }
 
+func (s *Server) GetAtespace(_ context.Context, req *ateapipb.GetAtespaceRequest) (*ateapipb.Atespace, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	name := req.GetAtespace().GetName()
+	atespace, ok := s.atespaces[name]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "atespace %s not found", name)
+	}
+	return proto.Clone(atespace).(*ateapipb.Atespace), nil
+}
+
 func (s *Server) GetActorTemplate(_ context.Context, req *ateapipb.GetActorTemplateRequest) (*ateapipb.ActorTemplate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

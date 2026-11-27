@@ -27,7 +27,7 @@ import (
 )
 
 func TestNewClientWithOptionsSendsPreviewMetadata(t *testing.T) {
-	received := make(chan metadata.MD, 1)
+	received := make(chan metadata.MD, 2)
 	server := substratetest.NewServer(t, grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, next grpc.UnaryHandler) (any, error) {
 		md, _ := metadata.FromIncomingContext(ctx)
 		received <- md.Copy()
@@ -44,8 +44,10 @@ func TestNewClientWithOptionsSendsPreviewMetadata(t *testing.T) {
 	if err := client.EnsureAtespace(ctx, "preview-test"); err != nil {
 		t.Fatal(err)
 	}
-	md := <-received
-	if !reflect.DeepEqual(md.Get("ate-preview-allowed"), []string{"true"}) || !reflect.DeepEqual(md.Get("x-correlation"), []string{"preserved"}) {
-		t.Fatalf("server received metadata %v", md)
+	for range 2 {
+		md := <-received
+		if !reflect.DeepEqual(md.Get("ate-preview-allowed"), []string{"true"}) || !reflect.DeepEqual(md.Get("x-correlation"), []string{"preserved"}) {
+			t.Fatalf("server received metadata %v", md)
+		}
 	}
 }
