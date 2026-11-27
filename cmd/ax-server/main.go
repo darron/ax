@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,6 +55,7 @@ func main() {
 		substratePlaintext      bool
 		defaultTemplate         string
 		defaultTemplateAtespace string
+		workerSelector          string
 		defaultTaskImage        string
 		runnerVolumeImage       string
 		runnerEndpoint          string
@@ -74,6 +76,7 @@ func main() {
 	flag.BoolVar(&substratePlaintext, "substrate-plaintext", false, "Use insecure plaintext gRPC connection to Substrate")
 	flag.StringVar(&defaultTemplate, "template", "default-template", "Default Substrate ActorTemplate name")
 	flag.StringVar(&defaultTemplateAtespace, "template-atespace", v1alpha1.DefaultSystemNamespace, "Default Substrate ActorTemplate atespace")
+	flag.StringVar(&workerSelector, "worker-selector", "", "WorkerPool label=value selector for new AX actors (empty adds no actor-level constraint)")
 	flag.StringVar(&defaultTaskImage, "default-task-image", v1alpha1.DefaultTaskImage, "Container image for tasks that do not set spec.profile.image (env: AX_DEFAULT_TASK_IMAGE)")
 	flag.StringVar(&runnerVolumeImage, "runner-volume-image", "", "Digest-pinned runner volume image (Dockerfile.runner-volume) to mount read-only into task containers and run the runner from; empty runs the runner baked into the task image (env: AX_RUNNER_VOLUME_IMAGE)")
 	flag.StringVar(&runnerEndpoint, "runner-endpoint", substrate.DefaultRunnerEndpoint, "In-cluster host:port of the :8081 runner service allowed in actor EgressPolicies (env: AX_RUNNER_ENDPOINT)")
@@ -81,6 +84,12 @@ func main() {
 	flag.StringVar(&actorJWTAudience, "actor-jwt-audience", substrate.DefaultRunnerAudience, "Expected OIDC audience for Actor JWTs on :8081 (env: AX_ACTOR_JWT_AUDIENCE)")
 	flag.BoolVar(&enablePrewarm, "enable-prewarm", false, "Enable Workspace snapshot pre-warming via the :8081 runner setup coordinator (env: AX_ENABLE_PREWARM)")
 	flag.Parse()
+
+	workerSelectorLabels, err := parseWorkerSelector(workerSelector)
+	if err != nil {
+		slog.Error("invalid worker selector", "error", err)
+		os.Exit(1)
+	}
 
 	if envAddr := os.Getenv("ADDR"); envAddr != "" {
 		listenAddr = envAddr
@@ -154,12 +163,13 @@ func main() {
 	defer backend.Close()
 
 	subClient, err := substrate.NewClientWithOptions(substrate.ClientOptions{
-		Target:      substrateEndpoint,
-		Authority:   substrateAuthority,
-		TokenFile:   substrateTokenFile,
-		CAFile:      substrateCAFile,
-		InsecureTLS: substrateInsecureTLS,
-		Plaintext:   substratePlaintext,
+		Target:         substrateEndpoint,
+		Authority:      substrateAuthority,
+		TokenFile:      substrateTokenFile,
+		CAFile:         substrateCAFile,
+		InsecureTLS:    substrateInsecureTLS,
+		Plaintext:      substratePlaintext,
+		WorkerSelector: workerSelectorLabels,
 	}, grpc.WithStatsHandler(telemetry.ClientStatsHandler()))
 	if err != nil {
 		slog.Error("initializing substrate client", "error", err)
@@ -269,6 +279,18 @@ func main() {
 	if metricsServer != nil {
 		_ = metricsServer.Shutdown(shutdownCtx)
 	}
+}
+
+func parseWorkerSelector(raw string) (map[string]string, error) {
+	if raw == "" {
+		return nil, nil
+	}
+
+	key, value, ok := strings.Cut(raw, "=")
+	if !ok || key == "" || value == "" || strings.Contains(value, "=") {
+		return nil, fmt.Errorf("%q must be one non-empty label=value pair", raw)
+	}
+	return map[string]string{key: value}, nil
 }
 
 // validateRunnerVolumeImage checks that a configured runner volume image is

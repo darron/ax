@@ -38,16 +38,18 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // ClientOptions configures connection to the Substrate Control API server.
 type ClientOptions struct {
-	Target      string
-	Authority   string
-	TokenFile   string
-	CAFile      string
-	InsecureTLS bool
-	Plaintext   bool
+	Target         string
+	Authority      string
+	TokenFile      string
+	CAFile         string
+	InsecureTLS    bool
+	Plaintext      bool
+	WorkerSelector map[string]string
 }
 
 type tokenAuth struct {
@@ -73,8 +75,9 @@ func (t tokenAuth) RequireTransportSecurity() bool {
 
 // Client wraps the Substrate Control API client.
 type Client struct {
-	conn    *grpc.ClientConn
-	control ateapipb.ControlClient
+	conn           *grpc.ClientConn
+	control        ateapipb.ControlClient
+	workerSelector map[string]string
 }
 
 // NewClientWithOptions connects to Substrate with full TLS and auth configuration.
@@ -156,8 +159,9 @@ func NewClientWithOptions(opts ClientOptions, extraDialOpts ...grpc.DialOption) 
 		return nil, fmt.Errorf("failed to connect to Substrate control service at %s: %w", opts.Target, err)
 	}
 	return &Client{
-		conn:    conn,
-		control: ateapipb.NewControlClient(conn),
+		conn:           conn,
+		control:        ateapipb.NewControlClient(conn),
+		workerSelector: maps.Clone(opts.WorkerSelector),
 	}, nil
 }
 
@@ -562,8 +566,9 @@ func (c *Client) EnsureActor(ctx context.Context, atespace, actorName, templateA
 // seeded from sourceTagName (a Workspace snapshot Tag) when non-empty.
 func (c *Client) EnsureActorFromTag(ctx context.Context, atespace, actorName, templateAtespace, templateName, sourceTagName string) (*ateapipb.Actor, error) {
 	actorSpec := &ateapipb.Actor{
-		Metadata:      &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName},
-		ActorTemplate: &ateapipb.ObjectRef{Atespace: templateAtespace, Name: templateName},
+		Metadata:       &ateapipb.ResourceMetadata{Atespace: atespace, Name: actorName},
+		ActorTemplate:  &ateapipb.ObjectRef{Atespace: templateAtespace, Name: templateName},
+		WorkerSelector: workerSelector(c.workerSelector),
 	}
 	if sourceTagName != "" {
 		actorSpec.SourceTag = &ateapipb.ObjectRef{Atespace: atespace, Name: sourceTagName}
@@ -600,6 +605,10 @@ func (c *Client) resolveExistingActor(ctx context.Context, req *ateapipb.CreateA
 	if err != nil || existing == nil {
 		return existing, err
 	}
+	configuredSelector := workerSelector(c.workerSelector)
+	if configuredSelector != nil && !proto.Equal(existing.GetWorkerSelector(), configuredSelector) {
+		return nil, fmt.Errorf("existing actor %s/%s has worker selector %v, want %v", atespace, actorName, existing.GetWorkerSelector(), configuredSelector)
+	}
 	switch existing.GetStatus().GetState() {
 	case ateapipb.ActorState_ACTOR_STATE_CRASHED:
 		return c.recoverCrashedActor(ctx, req, atespace, actorName)
@@ -608,6 +617,13 @@ func (c *Client) resolveExistingActor(ctx context.Context, req *ateapipb.CreateA
 	default:
 		return existing, nil
 	}
+}
+
+func workerSelector(labels map[string]string) *ateapipb.Selector {
+	if len(labels) == 0 {
+		return nil
+	}
+	return &ateapipb.Selector{MatchLabels: maps.Clone(labels)}
 }
 
 // recoverCrashedActor rolls a crashed actor back to its last snapshot via

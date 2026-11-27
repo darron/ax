@@ -38,6 +38,14 @@ All Control API traffic goes through this package. It encapsulates:
   on unary and streaming control RPCs. AX templates set a per-template snapshot
   location; Substrate RC1 also needs the server-side
   `PerTemplateSnapshotLocation` gate. Request metadata alone never enables it.
+- **Actor placement** — `ax-server --worker-selector=label=value` adds the same
+  WorkerPool label requirement to every AX-created actor, including tag-seeded
+  and workspace setup actors. It defaults empty. The actor selector narrows the
+  ActorTemplate's selector; the template remains responsible for sandbox-class
+  selection. A non-empty configured selector must match an existing actor
+  before AX reuses it; AX never changes the selector on an existing actor. With
+  the default empty setting, AX imposes no selector requirement on existing
+  actors, preserving any actor-level constraints already present.
 - **Retry** — `IsTransientError` (`Unavailable`, `DeadlineExceeded`, `Aborted`) + `callWithRetry` (`retryOnCodes`).
 - **Helpers** the reconcilers rely on — `EnsureAtespace`, `EnsureActorTemplate`,
   `EnsureActorTemplateWithImage`, `BuildActorTemplate`, `EnsureActor`,
