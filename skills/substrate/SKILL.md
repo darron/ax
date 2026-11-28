@@ -48,11 +48,21 @@ All Control API traffic goes through this package. It encapsulates:
   actors, preserving any actor-level constraints already present.
 - **Retry** — `IsTransientError` (`Unavailable`, `DeadlineExceeded`, `Aborted`) + `callWithRetry` (`retryOnCodes`).
 - **Helpers** the reconcilers rely on — `EnsureAtespace`, `EnsureActorTemplate`,
-  `EnsureActorTemplateWithImage`, `BuildActorTemplate`, `EnsureActor`,
+  `EnsureActorTemplateWithImage`, `EnsureActorTemplateWithImageAndCapabilities`,
+  `BuildActorTemplate`, `EnsureActor`,
   `EnsureActorFromTag`, `GetActorEgressPolicy`, `EnsureActorEgressPolicy`,
   `CreateTag`, `GetTag`, `ListTags`, `DeleteTag`, `SuspendActor`,
   `SuspendActorAndWaitForSnapshot`, `ResumeActor`, `DeleteActor`, `WorkerIP`,
   `ResourceLimits`.
+
+- **Image-scoped guest capabilities** — `AX_GUEST_CAPABILITIES_IMAGE` and
+  `AX_GUEST_CAPABILITIES` must be configured together. The image is an exact
+  digest reference; the comma-separated capability names use the Substrate
+  spelling without a `CAP_` prefix, and `ALL` is rejected. AX adds them only
+  to AX-managed task or workspace ActorTemplates whose resolved guest image
+  exactly matches. The capability set participates in the deterministic
+  template name; user-managed `ateTemplate` references and worker Pods are
+  unchanged. Both settings unset preserves the existing template behavior.
 
 ### Where a new Control API call lives today
 

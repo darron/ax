@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/google/ax/internal/resources"
 	"github.com/google/ax/internal/substrate"
@@ -74,7 +75,7 @@ type profile struct {
 	snapshotFidelity ateapipb.SnapshotFidelity
 }
 
-func (p profile) templateName(runnerImage string) string {
+func (p profile) templateName(runnerImage string, capabilitiesAdd []string) string {
 	h := sha256.New()
 	_, _ = fmt.Fprintf(h, "%s\x00%s\x00%d\x00%d\x00%s",
 		p.image,
@@ -83,6 +84,9 @@ func (p profile) templateName(runnerImage string) string {
 		p.memoryBytes,
 		p.snapshotFidelity.String(),
 	)
+	if len(capabilitiesAdd) > 0 {
+		_, _ = fmt.Fprintf(h, "\x00capabilities=%s", strings.Join(capabilitiesAdd, ","))
+	}
 	sum := h.Sum(nil)
 	return "ax-" + hex.EncodeToString(sum[:8])
 }
@@ -90,6 +94,8 @@ func (p profile) templateName(runnerImage string) string {
 // ResolveProfileTemplate resolves p into a deterministic Substrate
 // ActorTemplate name and specification. When p omits image, defaultTaskImage is
 // used (falling back to v1alpha1.DefaultTaskImage if defaultTaskImage is empty).
+// A supplied guest capability policy is applied only when the resolved image
+// exactly matches its configured digest.
 //
 // The returned atespace is where the template lives: ateTemplate.atespace when set,
 // otherwise atespace (the task's own, defaulting to DefaultAtespace).
@@ -102,10 +108,11 @@ func (p profile) templateName(runnerImage string) string {
 // Otherwise, omitted resource limits fall back to Substrate's default CPU/memory
 // limits, SnapshotConfig.PreferredFidelity defaults to SNAPSHOT_FIDELITY_ROOTFS,
 // and the content-addressed template ("ax-<16-char-sha256>", hashed over the
-// profile and runner volume image) is returned ready for EnsureActorTemplate.
+// resolved profile, runner volume image and any matching guest capabilities) is
+// returned ready for EnsureActorTemplate.
 // A non-empty runnerImage is mounted read-only into the template's container,
 // which then runs the runner from it (see substrate.MountRunnerVolume).
-func ResolveProfileTemplate(atespace string, p *v1alpha1.Profile, defaultTaskImage, runnerImage string) (string, string, *ateapipb.ActorTemplate, error) {
+func ResolveProfileTemplate(atespace string, p *v1alpha1.Profile, defaultTaskImage, runnerImage string, policies ...GuestCapabilitiesPolicy) (string, string, *ateapipb.ActorTemplate, error) {
 	if atespace == "" {
 		atespace = v1alpha1.DefaultAtespace
 	}
@@ -120,6 +127,11 @@ func ResolveProfileTemplate(atespace string, p *v1alpha1.Profile, defaultTaskIma
 	if image == "" {
 		image = defaultTaskImage
 	}
+	var guestCapabilities GuestCapabilitiesPolicy
+	if len(policies) > 0 {
+		guestCapabilities = policies[0]
+	}
+	capabilitiesAdd := guestCapabilities.ForImage(image)
 
 	cpuMillicores := substrate.DefaultCPUMillicores
 	if cpu := p.GetResources().GetLimits().GetCpu(); cpu != "" {
@@ -145,7 +157,7 @@ func ResolveProfileTemplate(atespace string, p *v1alpha1.Profile, defaultTaskIma
 		memoryBytes:      memoryBytes,
 		snapshotFidelity: DefaultProfileSnapshotFidelity,
 	}
-	name := resolved.templateName(runnerImage)
+	name := resolved.templateName(runnerImage, capabilitiesAdd)
 
 	tmpl := substrate.BuildActorTemplate(atespace, name, image, nil, nil, "", &ateapipb.ResourceRequirements{
 		Limits: &ateapipb.Resources{
@@ -154,6 +166,7 @@ func ResolveProfileTemplate(atespace string, p *v1alpha1.Profile, defaultTaskIma
 		},
 	})
 	tmpl.SnapshotConfig.PreferredFidelity = resolved.snapshotFidelity
+	substrate.AddGuestCapabilities(tmpl, capabilitiesAdd)
 	substrate.MountRunnerVolume(tmpl, runnerImage)
 	return atespace, name, tmpl, nil
 }
@@ -175,8 +188,8 @@ func ProfileTemplateAtespace(taskAtespace string, p *v1alpha1.Profile) string {
 // name and ensures it exists on Substrate: verifying user-supplied ateTemplate
 // references via GetActorTemplate without mutating them, or provisioning
 // AX-managed templates via EnsureActorTemplate.
-func ensureProfileTemplate(ctx context.Context, client *substrate.Client, atespace string, p *v1alpha1.Profile, defaultTaskImage, runnerImage string) (string, string, error) {
-	tplAtespace, tplName, tplSpec, err := ResolveProfileTemplate(atespace, p, defaultTaskImage, runnerImage)
+func ensureProfileTemplate(ctx context.Context, client *substrate.Client, atespace string, p *v1alpha1.Profile, defaultTaskImage, runnerImage string, policies ...GuestCapabilitiesPolicy) (string, string, error) {
+	tplAtespace, tplName, tplSpec, err := ResolveProfileTemplate(atespace, p, defaultTaskImage, runnerImage, policies...)
 	if err != nil {
 		return "", "", err
 	}

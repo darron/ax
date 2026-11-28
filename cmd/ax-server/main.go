@@ -58,6 +58,8 @@ func main() {
 		workerSelector          string
 		defaultTaskImage        string
 		runnerVolumeImage       string
+		guestCapabilitiesImage  string
+		guestCapabilitiesRaw    string
 		runnerEndpoint          string
 		actorJWTIssuer          string
 		actorJWTAudience        string
@@ -79,6 +81,8 @@ func main() {
 	flag.StringVar(&workerSelector, "worker-selector", "", "WorkerPool label=value selector for new AX actors (empty adds no actor-level constraint)")
 	flag.StringVar(&defaultTaskImage, "default-task-image", v1alpha1.DefaultTaskImage, "Container image for tasks that do not set spec.profile.image (env: AX_DEFAULT_TASK_IMAGE)")
 	flag.StringVar(&runnerVolumeImage, "runner-volume-image", "", "Digest-pinned runner volume image (Dockerfile.runner-volume) to mount read-only into task containers and run the runner from; empty runs the runner baked into the task image (env: AX_RUNNER_VOLUME_IMAGE)")
+	flag.StringVar(&guestCapabilitiesImage, "guest-capabilities-image", "", "Exact digest-pinned guest image receiving AX_GUEST_CAPABILITIES (env: AX_GUEST_CAPABILITIES_IMAGE)")
+	flag.StringVar(&guestCapabilitiesRaw, "guest-capabilities", "", "Comma-separated Linux capabilities added to the matching guest container (env: AX_GUEST_CAPABILITIES)")
 	flag.StringVar(&runnerEndpoint, "runner-endpoint", substrate.DefaultRunnerEndpoint, "In-cluster host:port of the :8081 runner service allowed in actor EgressPolicies (env: AX_RUNNER_ENDPOINT)")
 	flag.StringVar(&actorJWTIssuer, "actor-jwt-issuer", "https://idp.ate-system.svc", "Substrate OIDC issuer URL for verifying Actor JWTs on :8081 (env: AX_ACTOR_JWT_ISSUER)")
 	flag.StringVar(&actorJWTAudience, "actor-jwt-audience", substrate.DefaultRunnerAudience, "Expected OIDC audience for Actor JWTs on :8081 (env: AX_ACTOR_JWT_AUDIENCE)")
@@ -109,6 +113,12 @@ func main() {
 	if envImage := os.Getenv("AX_RUNNER_VOLUME_IMAGE"); envImage != "" {
 		runnerVolumeImage = envImage
 	}
+	if envImage := os.Getenv("AX_GUEST_CAPABILITIES_IMAGE"); envImage != "" {
+		guestCapabilitiesImage = envImage
+	}
+	if envCapabilities := os.Getenv("AX_GUEST_CAPABILITIES"); envCapabilities != "" {
+		guestCapabilitiesRaw = envCapabilities
+	}
 	if envEndpoint := os.Getenv("AX_RUNNER_ENDPOINT"); envEndpoint != "" {
 		runnerEndpoint = envEndpoint
 	}
@@ -127,6 +137,11 @@ func main() {
 
 	if err := validateRunnerVolumeImage(runnerVolumeImage); err != nil {
 		slog.Error("invalid runner volume image", "error", err)
+		os.Exit(1)
+	}
+	guestCapabilities, err := controller.ParseGuestCapabilitiesPolicy(guestCapabilitiesImage, guestCapabilitiesRaw)
+	if err != nil {
+		slog.Error("invalid guest capability policy", "error", err)
 		os.Exit(1)
 	}
 
@@ -151,6 +166,8 @@ func main() {
 		"template", defaultTemplate,
 		"defaultTaskImage", defaultTaskImage,
 		"runnerVolumeImage", runnerVolumeImage,
+		"guestCapabilitiesImage", guestCapabilities.Image,
+		"guestCapabilities", guestCapabilities.Add,
 	)
 
 	openCtx, openCancel := context.WithTimeout(context.Background(), time.Minute)
@@ -206,14 +223,16 @@ func main() {
 
 	reconciler := controller.NewTaskReconciler(subClient, defaultTemplate, defaultTemplateAtespace, defaultTaskImage)
 	reconciler.RunnerVolumeImage = runnerVolumeImage
+	reconciler.GuestCapabilities = guestCapabilities
 	workspaces := controller.NewWorkspaceManager(subClient, controller.WorkspaceManagerOptions{
-		Locker:           backend,
-		Store:            backend,
-		SetupCoordinator: setupCoordinator,
-		DefaultTaskImage: defaultTaskImage,
-		RunnerImage:      runnerVolumeImage,
-		RunnerEndpoint:   runnerEndpoint,
-		RunnerAudience:   actorJWTAudience,
+		Locker:            backend,
+		Store:             backend,
+		SetupCoordinator:  setupCoordinator,
+		DefaultTaskImage:  defaultTaskImage,
+		RunnerImage:       runnerVolumeImage,
+		GuestCapabilities: guestCapabilities,
+		RunnerEndpoint:    runnerEndpoint,
+		RunnerAudience:    actorJWTAudience,
 	})
 	srv := server.NewServer(backend, reconciler, server.Options{
 		Locker:           backend,

@@ -137,6 +137,9 @@ type WorkspaceManagerOptions struct {
 	// DefaultTaskImage is used when a Profile omits image and ate_template
 	// (defaults to v1alpha1.DefaultTaskImage).
 	DefaultTaskImage string
+	// GuestCapabilities applies only to the exact digest-pinned guest image
+	// configured by the server operator.
+	GuestCapabilities GuestCapabilitiesPolicy
 	// RunnerImage is a static server-startup setting (changed only when
 	// ax-server is redeployed with a new flag/env digest, never mutated
 	// dynamically at runtime).
@@ -157,15 +160,16 @@ type WorkspaceManagerOptions struct {
 // snapshot pre-warming, lazy Tag resolution, and Tag cleanup. Unlike a
 // background controller loop, its methods are called inline by gRPC handlers.
 type WorkspaceManager struct {
-	client           *substrate.Client
-	locker           lock.Locker
-	store            WorkspaceStore
-	coordinator      SetupCoordinator
-	defaultTaskImage string
-	runnerImage      string
-	runnerEndpoint   string
-	runnerAudience   string
-	maxSetupAttempts int
+	client            *substrate.Client
+	locker            lock.Locker
+	store             WorkspaceStore
+	coordinator       SetupCoordinator
+	defaultTaskImage  string
+	runnerImage       string
+	guestCapabilities GuestCapabilitiesPolicy
+	runnerEndpoint    string
+	runnerAudience    string
+	maxSetupAttempts  int
 }
 
 // NewWorkspaceManager creates a WorkspaceManager backed by client.
@@ -195,15 +199,16 @@ func NewWorkspaceManager(client *substrate.Client, opts ...WorkspaceManagerOptio
 		attempts = defaultMaxSetupAttempts
 	}
 	return &WorkspaceManager{
-		client:           client,
-		locker:           locker,
-		store:            opt.Store,
-		coordinator:      opt.SetupCoordinator,
-		defaultTaskImage: defaultTaskImage,
-		runnerImage:      opt.RunnerImage,
-		runnerEndpoint:   runnerEndpoint,
-		runnerAudience:   runnerAudience,
-		maxSetupAttempts: attempts,
+		client:            client,
+		locker:            locker,
+		store:             opt.Store,
+		coordinator:       opt.SetupCoordinator,
+		defaultTaskImage:  defaultTaskImage,
+		runnerImage:       opt.RunnerImage,
+		guestCapabilities: opt.GuestCapabilities,
+		runnerEndpoint:    runnerEndpoint,
+		runnerAudience:    runnerAudience,
+		maxSetupAttempts:  attempts,
 	}
 }
 
@@ -324,7 +329,7 @@ func (m *WorkspaceManager) ensureSnapshotTag(ctx context.Context, ws *v1alpha1.W
 	if err := m.client.EnsureAtespace(ctx, atespace); err != nil {
 		return "", &stageError{reason: v1alpha1.ReasonAtespaceCreationFailed, underlyingErr: fmt.Errorf("ensuring atespace %q: %w", atespace, err)}
 	}
-	_, templateName, err := ensureProfileTemplate(ctx, m.client, atespace, prof, m.defaultTaskImage, m.runnerImage)
+	_, templateName, err := ensureProfileTemplate(ctx, m.client, atespace, prof, m.defaultTaskImage, m.runnerImage, m.guestCapabilities)
 	if err != nil {
 		return "", &stageError{reason: v1alpha1.ReasonTemplateCreationFailed, underlyingErr: err}
 	}
