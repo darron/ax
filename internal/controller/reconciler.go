@@ -75,6 +75,10 @@ type TaskReconciler struct {
 	// part of the template name, so a new digest provisions new templates.
 	// Empty keeps running the runner baked into the task image.
 	RunnerVolumeImage string
+
+	// GuestCapabilities applies only to the exact digest-pinned guest image
+	// configured by the server operator. It never changes host Pod privileges.
+	GuestCapabilities GuestCapabilitiesPolicy
 }
 
 // NewTaskReconciler creates a new TaskReconciler. Empty defaults fall back to
@@ -281,11 +285,12 @@ func (r *TaskReconciler) ensureTaskTemplate(
 
 	if image != "" || len(extraEnv) > 0 {
 		slog.Info("ensuring custom ActorTemplate for task", "image", image)
-		customTemplateName := taskTemplateName(task.Metadata.Name, image, r.RunnerVolumeImage, extraEnv)
+		capabilitiesAdd := r.GuestCapabilities.ForImage(image)
+		customTemplateName := taskTemplateName(task.Metadata.Name, image, r.RunnerVolumeImage, extraEnv, capabilitiesAdd)
 
 		// spec.profile.resources rides along in AX_TASK_YAML / AX_WORKSPACE_YAML, so a
 		// limits change is already part of the template digest and re-provisions the template.
-		tmpl, err := r.client.EnsureActorTemplateWithImage(ctx, templateAtespace, templateName, atespace, customTemplateName, image, r.RunnerVolumeImage, resources, extraEnv)
+		tmpl, err := r.client.EnsureActorTemplateWithImageAndCapabilities(ctx, templateAtespace, templateName, atespace, customTemplateName, image, r.RunnerVolumeImage, resources, capabilitiesAdd, extraEnv)
 		if err != nil {
 			if substrate.IsTransientError(err) {
 				r.setNotReady(task, v1alpha1.ReasonSubstrateUnavailable, err.Error(), now)
@@ -537,7 +542,7 @@ func setCondition(task *v1alpha1.Task, condType, status, reason, message string,
 // digest of the image, the runner volume image, and container environment, so a
 // spec or runner change yields a new template. An empty runnerVolumeImage leaves
 // the digest as it was before runner volumes existed.
-func taskTemplateName(taskName, image, runnerVolumeImage string, env map[string]string) string {
+func taskTemplateName(taskName, image, runnerVolumeImage string, env map[string]string, capabilitiesAdd []string) string {
 	h := sha256.New()
 	h.Write([]byte(image))
 	if runnerVolumeImage != "" {
@@ -550,6 +555,9 @@ func taskTemplateName(taskName, image, runnerVolumeImage string, env map[string]
 	sort.Strings(keys)
 	for _, k := range keys {
 		h.Write([]byte(k + "=" + env[k] + ";"))
+	}
+	if len(capabilitiesAdd) > 0 {
+		h.Write([]byte("\x00capabilities=" + strings.Join(capabilitiesAdd, ",")))
 	}
 	return fmt.Sprintf("%s-tmpl-%x", taskName, h.Sum(nil)[:templateDigestBytes])
 }

@@ -445,6 +445,82 @@ func TestTaskReconciler_RunnerVolumeImage(t *testing.T) {
 	}
 }
 
+func TestTaskReconciler_GuestCapabilitiesAreImageScoped(t *testing.T) {
+	const image = "us-docker.pkg.dev/example/agents/sandboxd@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	policy, err := controller.ParseGuestCapabilitiesPolicy(image, "CHOWN,FOWNER")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := func(t *testing.T, policy controller.GuestCapabilitiesPolicy, taskImage string) (*ateapipb.ActorTemplate, string) {
+		t.Helper()
+		lis, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("failed to listen: %v", err)
+		}
+		t.Cleanup(func() { lis.Close() })
+		mockSrv := &mockControlServer{}
+		grpcServer := grpc.NewServer()
+		ateapipb.RegisterControlServer(grpcServer, mockSrv)
+		go grpcServer.Serve(lis)
+		t.Cleanup(grpcServer.Stop)
+		client, err := substrate.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			t.Fatalf("failed to create substrate client: %v", err)
+		}
+		t.Cleanup(func() { client.Close() })
+
+		reconciler := controller.NewTaskReconciler(client, "test-template", v1alpha1.DefaultSystemNamespace, "")
+		reconciler.WorkspaceReadyTimeout = 200 * time.Millisecond
+		reconciler.GuestCapabilities = policy
+		task := &v1alpha1.Task{
+			ApiVersion: v1alpha1.APIVersion,
+			Kind:       v1alpha1.KindTask,
+			Metadata:   &v1alpha1.ObjectMeta{Name: "capabilities", Atespace: "default"},
+			Spec: &v1alpha1.TaskSpec{Profile: &v1alpha1.Profile{
+				Image:     taskImage,
+				Resources: &v1alpha1.ResourcesSpec{Limits: &v1alpha1.ResourceList{Cpu: "2", Memory: "2Gi"}},
+			}},
+		}
+		if err := reconciler.Resume(context.Background(), task, nil, nil); err != nil {
+			t.Fatalf("Resume failed: %v", err)
+		}
+		if len(mockSrv.createdTemplates) != 1 {
+			t.Fatalf("created %d templates, want 1", len(mockSrv.createdTemplates))
+		}
+		created := mockSrv.createdTemplates[0]
+		return created, created.GetMetadata().GetName()
+	}
+
+	defaultTemplate, defaultName := resume(t, controller.GuestCapabilitiesPolicy{}, image)
+	if defaultTemplate.GetContainers()[0].GetSecurityContext() != nil {
+		t.Fatalf("unset policy added guest security context: %v", defaultTemplate.GetContainers()[0].GetSecurityContext())
+	}
+
+	matched, matchedName := resume(t, policy, image)
+	if got := matched.GetContainers()[0].GetSecurityContext().GetCapabilities().GetAdd(); strings.Join(got, ",") != "CHOWN,FOWNER" {
+		t.Errorf("matching guest capabilities = %v, want [CHOWN FOWNER]", got)
+	}
+	if matchedName == defaultName {
+		t.Errorf("matching capability policy kept template name %q", matchedName)
+	}
+	if got := matched.GetResources().GetLimits(); got.GetCpuMillicores() != 2000 || got.GetMemoryBytes() != 2<<30 {
+		t.Errorf("capability policy changed resource limits: %v", got)
+	}
+
+	otherImage := "us-docker.pkg.dev/example/agents/other@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	otherDefault, otherDefaultName := resume(t, controller.GuestCapabilitiesPolicy{}, otherImage)
+	otherMatched, otherMatchedName := resume(t, policy, otherImage)
+	if otherMatched.GetContainers()[0].GetSecurityContext() != nil {
+		t.Errorf("nonmatching image received guest capabilities: %v", otherMatched.GetContainers()[0].GetSecurityContext())
+	}
+	if otherMatchedName != otherDefaultName {
+		t.Errorf("nonmatching image changed template name from %q to %q", otherDefaultName, otherMatchedName)
+	}
+	if otherDefault.GetContainers()[0].GetSecurityContext() != nil {
+		t.Errorf("default nonmatching template has guest security context %v", otherDefault.GetContainers()[0].GetSecurityContext())
+	}
+}
+
 func TestTaskReconciler_Suspend(t *testing.T) {
 	ctx := context.Background()
 

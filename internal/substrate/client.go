@@ -480,6 +480,22 @@ func BuildActorTemplate(atespace, name, image string, envMap map[string]string, 
 	}
 }
 
+// AddGuestCapabilities adds capabilities to the guest container in an AX-created
+// ActorTemplate. It leaves the template unchanged when add is empty.
+func AddGuestCapabilities(tmpl *ateapipb.ActorTemplate, add []string) {
+	if tmpl == nil || len(tmpl.Containers) == 0 || len(add) == 0 {
+		return
+	}
+	guest := tmpl.Containers[0]
+	if guest.SecurityContext == nil {
+		guest.SecurityContext = &ateapipb.SecurityContext{}
+	}
+	if guest.SecurityContext.Capabilities == nil {
+		guest.SecurityContext.Capabilities = &ateapipb.Capabilities{}
+	}
+	guest.SecurityContext.Capabilities.Add = append(slices.Clone(guest.SecurityContext.Capabilities.Add), add...)
+}
+
 // MountRunnerVolume makes tmpl's container run ax-task-runner from image, a
 // digest-pinned runner volume image (Dockerfile.runner-volume), instead of the
 // runner baked into the container image. Substrate mounts image read-only at
@@ -548,11 +564,19 @@ func (c *Client) EnsureActorTemplate(ctx context.Context, tmpl *ateapipb.ActorTe
 // TODO: Remove once TaskReconciler migrates from per-task templates to shared
 // Profile ActorTemplates via EnsureActorTemplate.
 func (c *Client) EnsureActorTemplateWithImage(ctx context.Context, baseAtespace, baseTemplate, targetAtespace, targetTemplate, image, runnerVolumeImage string, resources *ateapipb.ResourceRequirements, extraEnv ...map[string]string) (*ateapipb.ActorTemplate, error) {
+	return c.EnsureActorTemplateWithImageAndCapabilities(ctx, baseAtespace, baseTemplate, targetAtespace, targetTemplate, image, runnerVolumeImage, resources, nil, extraEnv...)
+}
+
+// EnsureActorTemplateWithImageAndCapabilities creates an ActorTemplate like
+// EnsureActorTemplateWithImage, optionally adding Linux capabilities to its
+// guest container. The capabilities do not affect the worker or host Pod.
+func (c *Client) EnsureActorTemplateWithImageAndCapabilities(ctx context.Context, baseAtespace, baseTemplate, targetAtespace, targetTemplate, image, runnerVolumeImage string, resources *ateapipb.ResourceRequirements, capabilitiesAdd []string, extraEnv ...map[string]string) (*ateapipb.ActorTemplate, error) {
 	envMap := make(map[string]string)
 	for _, envs := range extraEnv {
 		maps.Copy(envMap, envs)
 	}
 	tmpl := BuildActorTemplate(targetAtespace, targetTemplate, image, envMap, nil, "", resources)
+	AddGuestCapabilities(tmpl, capabilitiesAdd)
 	MountRunnerVolume(tmpl, runnerVolumeImage)
 	return c.EnsureActorTemplate(ctx, tmpl)
 }

@@ -181,6 +181,15 @@ Stop if either digest check fails. Use the registry digests recorded by
 overrides it: replace private image references in any adapted examples with your
 own runner digest ([#424](https://github.com/google/ax/issues/424)).
 
+Operators can optionally set `AX_GUEST_CAPABILITIES_IMAGE` together with
+`AX_GUEST_CAPABILITIES`, a comma-separated list such as `CHOWN,FOWNER`. The image
+must be digest-pinned, and the server rejects an incomplete or malformed pair at
+startup. AX adds the capabilities only to AX-managed guest ActorTemplates whose
+resolved image exactly matches that digest. Existing user-managed
+`ateTemplate` references are not changed; host Pods, WorkerPool selection and
+requested task resources are unaffected. Leaving both settings unset preserves
+the default template behavior.
+
 ## 3. Render and deploy the control plane
 
 Render both image references into a saved copy of the production manifest:

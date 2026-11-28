@@ -806,6 +806,34 @@ func TestClient_EnsureActorTemplateWithImage_Success(t *testing.T) {
 	}
 }
 
+func TestClient_EnsureActorTemplateWithImageAndCapabilities(t *testing.T) {
+	mock := &mockControlClient{}
+	c := &Client{control: mock}
+	resources := &ateapipb.ResourceRequirements{Limits: &ateapipb.Resources{CpuMillicores: 2000, MemoryBytes: 2 << 30}}
+	capabilities := []string{"CHOWN", "FOWNER"}
+
+	created, err := c.EnsureActorTemplateWithImageAndCapabilities(
+		context.Background(),
+		v1alpha1.DefaultSystemNamespace,
+		"default-template",
+		"default",
+		"task-1-tmpl-abcd",
+		"custom-image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"",
+		resources,
+		capabilities,
+	)
+	if err != nil {
+		t.Fatalf("EnsureActorTemplateWithImageAndCapabilities failed: %v", err)
+	}
+	if got := created.GetContainers()[0].GetSecurityContext().GetCapabilities().GetAdd(); !slices.Equal(got, capabilities) {
+		t.Errorf("guest capabilities = %v, want %v", got, capabilities)
+	}
+	if !proto.Equal(created.GetResources(), resources) {
+		t.Errorf("template resources = %v, want %v", created.GetResources(), resources)
+	}
+}
+
 func TestClient_EnsureActorTemplateWithImage_PropagatesError(t *testing.T) {
 	mock := &mockControlClient{
 		createTemplateErrs: []error{
